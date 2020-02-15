@@ -124,28 +124,30 @@ let me know?  http://forum.pjrc.com/forums/4-Suggestions-amp-Bug-Reports
 //#include "usb2_t3.h"
 
 #if defined(USB2_SERIAL)
-  #define VENDOR_ID		0x16C0
-  #define PRODUCT_ID		0x0483
-  #define DEVICE_CLASS		2	// 2 = Communication Class
-  #define MANUFACTURER_NAME	{'T','e','e','n','s','y','d','u','i','n','o'}
-  #define MANUFACTURER_NAME_LEN	11
-  #define PRODUCT_NAME		{'U','S','B',' ','S','e','r','i','a','l'}
-  #define PRODUCT_NAME_LEN	10
-  #define EP0_SIZE		64
-  #define NUM_ENDPOINTS		4
-  #define NUM_USB_BUFFERS	12
-  #define NUM_INTERFACE		2
-  #define CDC_STATUS_INTERFACE	0
-  #define CDC_DATA_INTERFACE	1
-  #define CDC_ACM_ENDPOINT	2
-  #define CDC_RX_ENDPOINT       3
-  #define CDC_TX_ENDPOINT       4
-  #define CDC_ACM_SIZE          16
-  #define CDC_RX_SIZE           64
-  #define CDC_TX_SIZE           64
-  #define ENDPOINT2_CONFIG	ENDPOINT_RECEIVE_UNUSED + ENDPOINT_TRANSMIT_INTERRUPT
-  #define ENDPOINT3_CONFIG	ENDPOINT_RECEIVE_BULK + ENDPOINT_TRANSMIT_UNUSED
-  #define ENDPOINT4_CONFIG  ENDPOINT_RECEIVE_UNUSED + ENDPOINT_TRANSMIT_BULK
+  #define USB2_VENDOR_ID		0x16C0
+  #define USB2_PRODUCT_ID		0x0483
+  #define USB2_DEVICE_CLASS		2	// 2 = Communication Class
+  #define USB2_MANUFACTURER_NAME	{'T','e','e','n','s','y','d','u','i','n','o'}
+  #define USB2_MANUFACTURER_NAME_LEN	11
+  #define USB2_PRODUCT_NAME		{'U','S','B',' ','S','e','r','i','a','l'}
+  #define USB2_PRODUCT_NAME_LEN	10
+  #define USB2_EP0_SIZE		64
+  #define USB2_NUM_ENDPOINTS		4
+  #define USB2_NUM_USB_BUFFERS	12
+  #define USB2_NUM_INTERFACE		2
+  #define USB2_CDC_STATUS_INTERFACE	0
+  #define USB2_CDC_DATA_INTERFACE	1
+  #define USB2_CDC_ACM_ENDPOINT	2
+  #define USB2_CDC_RX_ENDPOINT       3
+  #define USB2_CDC_TX_ENDPOINT       4
+  #define USB2_CDC_ACM_SIZE          16
+  #define USB2_CDC_RX_SIZE_480       512
+  #define USB2_CDC_TX_SIZE_480       512
+  #define USB2_CDC_RX_SIZE_12        64
+  #define USB2_CDC_TX_SIZE_12        64
+  #define USB2_NDPOINT2_CONFIG	ENDPOINT_RECEIVE_UNUSED + ENDPOINT_TRANSMIT_INTERRUPT
+  #define USB2_ENDPOINT3_CONFIG	ENDPOINT_RECEIVE_BULK + ENDPOINT_TRANSMIT_UNUSED
+  #define USB2_ENDPOINT4_CONFIG  ENDPOINT_RECEIVE_UNUSED + ENDPOINT_TRANSMIT_BULK
 
 #elif defined(USB2_MTPDISK_SERIAL)
   #define USB2_VENDOR_ID             0x16C0

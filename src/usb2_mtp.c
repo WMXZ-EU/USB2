@@ -33,7 +33,7 @@
 #include <string.h>    // for memcpy()
 //#include "HardwareSerial.h"
 
-#if !defined(USB_MTPDISK) && !defined(USB_MTPDISK_SERIAL)
+#if (defined(USB2_MTPDISK) ||defined(USB2_MTPDISK)) && !defined(USB_MTPDISK) && !defined(USB_MTPDISK_SERIAL)
 
 #include "usb2_dev.h"
 #include "usb2_mtp.h"
