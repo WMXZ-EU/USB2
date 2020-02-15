@@ -1,0 +1,860 @@
+#include <stdio.h>
+#include <string.h>
+
+#if !defined(USB_MTPDISK) && !defined(USB_MTPDISK_SERIAL)
+
+#define USB2_DESC_LIST_DEFINE
+#include "usb2_desc.h"
+#undef USB2_DESC_LIST_DEFINE
+
+#include "usb2_dev.h"
+
+#include "usb2_serial.h"
+#include "usb2_mtp.h"
+
+#include "usb2_t3.h"
+
+#if defined(USB_SERIAL)
+	int usb_serial_putchar(uint8_t c);
+	int usb_serial_write(const void *buffer, uint32_t size);
+	int usb_serial_write_buffer_free(void);
+	void usb_serial_flush_output(void);
+
+	void logg(uint8_t c) {usb_serial_putchar(c);usb_serial_flush_output();}
+	void log_write(char *txt, uint32_t val)
+	{
+		char  text[80];
+		sprintf(text,"%s %x\n",txt,(unsigned int)val),
+		usb_serial_write(text, strlen(text));
+		usb_serial_flush_output();
+	}
+#endif
+
+//#define LOG_SIZE  20
+//uint32_t transfer_log_head=0;
+//uint32_t transfer_log_count=0;
+//uint32_t transfer_log[LOG_SIZE];
+
+// device mode, page 3155
+
+typedef struct endpoint_struct usb2_endpoint_t;
+
+struct endpoint_struct {
+	uint32_t config;
+	uint32_t current;
+	uint32_t next;
+	uint32_t status;
+	uint32_t pointer0;
+	uint32_t pointer1;
+	uint32_t pointer2;
+	uint32_t pointer3;
+	uint32_t pointer4;
+	uint32_t reserved;
+	uint32_t setup0;
+	uint32_t setup1;
+	transfer_t *first_transfer;
+	transfer_t *last_transfer;
+	void (*callback_function)(transfer_t *completed_transfer);
+	uint32_t unused1;
+};
+
+/*struct transfer_struct {
+	uint32_t next;
+	uint32_t status;
+	uint32_t pointer0;
+	uint32_t pointer1;
+	uint32_t pointer2;
+	uint32_t pointer3;
+	uint32_t pointer4;
+	uint32_t callback_param;
+};*/
+
+usb2_endpoint_t usb2_endpoint_queue_head[(USB2_NUM_ENDPOINTS+1)*2] __attribute__ ((used, aligned(4096)));
+
+transfer_t usb2_endpoint0_transfer_data __attribute__ ((used, aligned(32)));
+transfer_t usb2_endpoint0_transfer_ack  __attribute__ ((used, aligned(32)));
+
+
+typedef union {
+ struct {
+  union {
+   struct {
+        uint8_t bmRequestType;
+        uint8_t bRequest;
+   };
+        uint16_t wRequestAndType;
+  };
+        uint16_t wValue;
+        uint16_t wIndex;
+        uint16_t wLength;
+ };
+ struct {
+        uint32_t word1;
+        uint32_t word2;
+ };
+	uint64_t bothwords;
+} setup_t;
+
+static setup_t usb2_endpoint0_setupdata;
+static uint32_t usb2_endpoint0_notify_mask=0;
+static uint32_t usb2_endpointN_notify_mask=0;
+//static int reset_count=0;
+volatile uint8_t usb2_configuration = 0;
+static uint8_t usb2_endpoint0_buffer[8];
+static uint8_t usb2_reboot_timer = 0;
+
+void (*usb2_timer0_callback)(void) = NULL;
+void (*usb2_timer1_callback)(void) = NULL;
+
+static void isr(void);
+static void usb2_endpoint0_setup(uint64_t setupdata);
+static void usb2_endpoint0_transmit(const void *data, uint32_t len, int notify);
+static void usb2_endpoint0_receive(void *data, uint32_t len, int notify);
+static void usb2_endpoint0_complete(void);
+
+static void run_callbacks(usb2_endpoint_t *ep);
+
+__attribute__((section(".progmem")))
+void usb2_init(void)
+{
+	// TODO: only enable when VBUS detected
+	// TODO: return to low power mode when VBUS removed
+	// TODO: protect PMU access with MPU
+	#if defined (__IMXRT62__)
+		PMU_REG_3P0 = PMU_REG_3P0_OUTPUT_TRG(0x0F) | PMU_REG_3P0_BO_OFFSET(6)
+			| PMU_REG_3P0_ENABLE_LINREG;
+			
+		usb2_init_serialnumber();
+
+		// assume PLL3 is already running - already done by usb2_pll_start() in main.c
+		CCM_CCGR6 |= CCM_CCGR6_USBOH3(CCM_CCGR_ON); // turn on clocks to USB peripheral
+
+	#else
+		usb2_init_serialnumber();
+	
+	    #if defined(HAS_KINETIS_MPU)
+		MPU_CESR = 0;                                                        // allow concurrent access to MPU controller
+		#endif
+
+
+		// turn on clocks p1682
+		MCG_C1 |= MCG_C1_IRCLKEN;  // enable MCGIRCLK 32kHz
+
+		OSC0_CR |= OSC_ERCLKEN;
+		SIM_SOPT2 |= SIM_SOPT2_USBREGEN; // turn on USB regulator
+		SIM_SOPT2 &= ~SIM_SOPT2_USBSLSRC; // use IRC for slow clock
+		
+		//println("power up USBHS PHY");
+		//SIM_USBPHYCTL |= SIM_USBPHYCTL_USBDISILIM; // disable USB current limit
+		SIM_USBPHYCTL = SIM_USBPHYCTL_USBDISILIM | SIM_USBPHYCTL_USB3VOUTTRG(6); // pg 237
+		
+		SIM_SCGC3 |= SIM_SCGC3_USBHSDCD |  SIM_SCGC3_USBHSPHY | SIM_SCGC3_USBHS;
+		USBHSDCD_CLOCK = 33 << 2;
+		
+		//println("init USBHS PHY & PLL");
+		// init process: page 1681-1682
+		USBPHY2_CTRL_CLR = (USBPHY_CTRL_SFTRST | USBPHY_CTRL_CLKGATE); // // CTRL pg 1698
+		USBPHY2_CTRL_SET = USBPHY_CTRL_ENUTMILEVEL2 | USBPHY_CTRL_ENUTMILEVEL3;
+		//USBPHY_CTRL_SET = USBPHY_CTRL_FSDLL_RST_EN; // TODO: what does this do??
+		USBPHY2_TRIM_OVERRIDE_EN_SET = 1;
+		
+		USBPHY2_PLL_SIC = USBPHY_PLL_SIC_PLL_POWER | USBPHY_PLL_SIC_PLL_ENABLE |
+							USBPHY_PLL_SIC_PLL_DIV_SEL(1) | USBPHY_PLL_SIC_PLL_EN_USB_CLKS;
+			
+		// wait for the PLL to lock
+		int pll_count=0;
+		while ((USBPHY2_PLL_SIC & USBPHY_PLL_SIC_PLL_LOCK) == 0) {
+			pll_count++;
+		}
+		//println("PLL locked, waited ",pll_count);
+	#endif
+
+	//printf("BURSTSIZE=%08lX\n", USB2_BURSTSIZE);
+	//USB2_BURSTSIZE = USB_BURSTSIZE_TXPBURST(4) | USB_BURSTSIZE_RXPBURST(4);
+	USB2_BURSTSIZE = 0x0404;
+	//printf("BURSTSIZE=%08lX\n", USB2_BURSTSIZE);
+	//printf("USB2_TXFILLTUNING=%08lX\n", USB2_TXFILLTUNING);
+	
+
+	// Before programming this register, the PHY clocks must be enabled in registers
+	// USBPHYx_CTRLn and CCM_ANALOG_USBPHYx_PLL_480_CTRLn.
+
+	//printf("USBPHY2_PWD=%08lX\n", USBPHY2_PWD);
+	//printf("USBPHY2_TX=%08lX\n", USBPHY2_TX);
+	//printf("USBPHY2_RX=%08lX\n", USBPHY2_RX);
+	//printf("USBPHY2_CTRL=%08lX\n", USBPHY2_CTRL);
+	//printf("USB2_USBMODE=%08lX\n", USB2_USBMODE);
+
+	// turn on PLL3, wait for 480 MHz lock?
+	// turn on CCM clock gates?  CCGR6[CG0]
+#if 1 
+	if ((USBPHY2_PWD & (USBPHY_PWD_RXPWDRX | USBPHY_PWD_RXPWDDIFF | USBPHY_PWD_RXPWD1PT1
+						| USBPHY_PWD_RXPWDENV | USBPHY_PWD_TXPWDV2I | USBPHY_PWD_TXPWDIBIAS
+						| USBPHY_PWD_TXPWDFS)) 
+		|| (USB2_USBMODE & USB_USBMODE_CM_MASK)) {
+		// USB controller is turned on from previous use
+		// reset needed to turn it off & start from clean slate
+		
+		USBPHY2_CTRL_SET = USBPHY_CTRL_SFTRST; // USBPHY2_CTRL page 3292
+		USB2_USBCMD |= USB_USBCMD_RST; // reset controller
+		
+		int count=0;
+		while (USB2_USBCMD & USB_USBCMD_RST) count++;
+		
+		NVIC_CLEAR_PENDING(IRQ_USB2);
+		USBPHY2_CTRL_CLR = USBPHY_CTRL_SFTRST; // reset PHY
+		//USB2_USBSTS = USB2_USBSTS; // TODO: is this needed?
+		//printf("USB reset took %d loops\n", count);
+		
+		//delay(10);
+		//printf("\n");
+		//printf("USBPHY2_PWD=%08lX\n", USBPHY2_PWD);
+		//printf("USBPHY2_TX=%08lX\n", USBPHY2_TX);
+		//printf("USBPHY2_RX=%08lX\n", USBPHY2_RX);
+		//printf("USBPHY2_CTRL=%08lX\n", USBPHY2_CTRL);
+		//printf("USB2_USBMODE=%08lX\n", USB2_USBMODE);
+		delay(25);
+	}
+#endif
+	// Device Controller Initialization, page 3161
+	// USBCMD	pg 3216
+	// USBSTS	pg 3220
+	// USBINTR	pg 3224
+	// DEVICEADDR	pg 3227
+	// ENDPTLISTADDR   3229
+	// USBMODE	pg 3244
+	// ENDPTSETUPSTAT  3245
+	// ENDPTPRIME	pg 3246
+	// ENDPTFLUSH	pg 3247
+	// ENDPTSTAT	pg 3247
+	// ENDPTCOMPLETE   3248
+	// ENDPTCTRL0	pg 3249
+
+	USBPHY2_CTRL_CLR = USBPHY_CTRL_CLKGATE;
+	USBPHY2_PWD = 0;
+	//printf("USBPHY2_PWD=%08lX\n", USBPHY2_PWD);
+	//printf("USBPHY2_CTRL=%08lX\n", USBPHY2_CTRL);
+
+	USB2_USBMODE = USB_USBMODE_CM(2) | USB_USBMODE_SLOM; // device mode
+	//
+	memset(usb2_endpoint_queue_head, 0, sizeof(usb2_endpoint_queue_head));
+	usb2_endpoint_queue_head[0].config = (64 << 16) | (1 << 15);
+	usb2_endpoint_queue_head[1].config = (64 << 16);
+	USB2_ENDPOINTLISTADDR = (uint32_t)&usb2_endpoint_queue_head;
+	//  Recommended: enable all device interrupts including: USBINT, USBERRINT,
+	// Port Change Detect, USB Reset Received, DCSuspend.
+	USB2_USBINTR = USB_USBINTR_UE | USB_USBINTR_UEE | /* USB_USBINTR_PCE | */
+		USB_USBINTR_URE | USB_USBINTR_SLE;
+	//_VectorsRam[IRQ_USB2+16] = &isr;
+	attachInterruptVector(IRQ_USB2, &isr);
+	NVIC_ENABLE_IRQ(IRQ_USB2);
+	//printf("USB2_ENDPTCTRL0=%08lX\n", USB2_ENDPTCTRL0);
+	//printf("USB2_ENDPTCTRL1=%08lX\n", USB2_ENDPTCTRL1);
+	//printf("USB2_ENDPTCTRL2=%08lX\n", USB2_ENDPTCTRL2);
+	//printf("USB2_ENDPTCTRL3=%08lX\n", USB2_ENDPTCTRL3);
+	USB2_USBCMD = USB_USBCMD_RS;
+	//transfer_log_head = 0;
+	//transfer_log_count = 0;
+}
+
+
+static void isr(void)
+{
+	//printf("*");
+	//  Port control in device mode is only used for
+	//  status port reset, suspend, and current connect status.
+	uint32_t status = USB2_USBSTS;
+	USB2_USBSTS = status;
+
+	// USB_USBSTS_SLI - set to 1 when enters a suspend state from an active state
+	// USB_USBSTS_SRI - set at start of frame
+	// USB_USBSTS_SRI - set when USB reset detected
+
+	if (status & USB_USBSTS_UI) {
+		//printf("data\n");
+		uint32_t setupstatus = USB2_ENDPTSETUPSTAT;
+		//printf("USB2_ENDPTSETUPSTAT=%X\n", setupstatus);
+		while (setupstatus) {
+			USB2_ENDPTSETUPSTAT = setupstatus;
+			setup_t s;
+			do {
+				USB2_USBCMD |= USB_USBCMD_SUTW;
+				s.word1 = usb2_endpoint_queue_head[0].setup0;
+				s.word2 = usb2_endpoint_queue_head[0].setup1;
+			} while (!(USB2_USBCMD & USB_USBCMD_SUTW));
+			USB2_USBCMD &= ~USB_USBCMD_SUTW;
+			//printf("setup %08lX %08lX\n", s.word1, s.word2);
+			USB2_ENDPTFLUSH = (1<<16) | (1<<0); // page 3174
+			while (USB2_ENDPTFLUSH & ((1<<16) | (1<<0))) ;
+			usb2_endpoint0_notify_mask = 0;
+			usb2_endpoint0_setup(s.bothwords);
+			setupstatus = USB2_ENDPTSETUPSTAT; // page 3175
+		}
+		uint32_t completestatus = USB2_ENDPTCOMPLETE;
+		if (completestatus) {
+			USB2_ENDPTCOMPLETE = completestatus;
+			
+			//printf("USB2_ENDPTCOMPLETE=%lX\n", completestatus);
+			if (completestatus & usb2_endpoint0_notify_mask) {
+				usb2_endpoint0_notify_mask = 0;
+				usb2_endpoint0_complete();
+			}
+			completestatus &= usb2_endpointN_notify_mask;
+			if (completestatus) {
+				int i;   // TODO: optimize with __builtin_ctz()
+				for (i=2; i < USB2_NUM_ENDPOINTS; i++) {
+					if (completestatus & (1 << i)) { // receive
+						run_callbacks(usb2_endpoint_queue_head + i * 2);
+					}
+					if (completestatus & (1 << (i + 16))) { // transmit
+						run_callbacks(usb2_endpoint_queue_head + i * 2 + 1);
+					}
+				}
+			}
+		}
+	}
+	if (status & USB_USBSTS_URI) { // page 3164
+
+		USB2_ENDPTSETUPSTAT = USB2_ENDPTSETUPSTAT; // Clear all setup token semaphores
+		USB2_ENDPTCOMPLETE = USB2_ENDPTCOMPLETE; // Clear all the endpoint complete status
+		while (USB2_ENDPTPRIME != 0) ; // Wait for any endpoint priming
+		USB2_ENDPTFLUSH = 0xFFFFFFFF;  // Cancel all endpoint primed status
+
+		if ((USB2_PORTSC1 & USB_PORTSC1_PR)) {
+			//printf("reset\n");
+		} else {
+			// we took too long to respond :(
+			// TODO; is this ever really a problem?
+			//printf("reset too slow\n");
+		}
+		#if defined(USB2_CDC_STATUS_INTERFACE) && defined(USB2_CDC_DATA_INTERFACE)
+		usb2_serial_reset();
+		#endif
+		#if defined(USB2_SEREMU_INTERFACE)
+		usb2_seremu_reset();
+		#endif
+		usb2_endpointN_notify_mask = 0;
+		// TODO: Free all allocated dTDs
+		//if (++reset_count >= 3) {
+			// shut off USB - easier to see results in protocol analyzer
+			//USB2_USBCMD &= ~USB_USBCMD_RS;
+			//printf("shut off USB\n");
+		//}
+	}
+	if (status & USB_USBSTS_TI0) {
+		if (usb2_timer0_callback != NULL) usb2_timer0_callback();
+	}
+	if (status & USB_USBSTS_TI1) {
+		if (usb2_timer1_callback != NULL) usb2_timer1_callback();
+	}
+	if (status & USB_USBSTS_PCI) {
+		if (USB2_PORTSC1 & USB_PORTSC1_HSP) {
+			//printf("port at 480 Mbit\n");
+		} else {
+			//printf("port at 12 Mbit\n");
+		}
+	}
+	if (status & USB_USBSTS_SLI) { // page 3165
+		//printf("suspend\n");
+	}
+	if (status & USB_USBSTS_UEI) {
+		//printf("error\n");
+	}
+	if ((USB2_USBINTR & USB_USBINTR_SRE) && (status & USB_USBSTS_SRI)) {
+		//printf("sof %d\n", usb2_reboot_timer);
+		if (usb2_reboot_timer) {
+			if (--usb2_reboot_timer == 0) {
+				asm("bkpt #251"); // run bootloader
+			}
+		} else {
+			// turn off the SOF interrupt if nothing using it
+			USB2_USBINTR &= ~USB_USBINTR_SRE;
+		}
+	}
+}
+
+
+/*
+struct transfer_struct { // table 55-60, pg 3159
+	uint32_t next;
+	uint32_t status;
+	uint32_t pointer0;
+	uint32_t pointer1;
+	uint32_t pointer2;
+	uint32_t pointer3;
+	uint32_t pointer4;
+	uint32_t unused1;
+};
+transfer_t usb2_endpoint0_transfer_data __attribute__ ((aligned(32)));;
+transfer_t usb2_endpoint0_transfer_ack  __attribute__ ((aligned(32)));;
+*/
+
+static uint8_t reply_buffer[8];
+
+static void usb2_endpoint0_setup(uint64_t setupdata)
+{
+	setup_t setup;
+	uint32_t usb2_endpoint, dir, ctrl, datalen = 0;
+	const usb_descriptor_list_t *list;
+
+	setup.bothwords = setupdata;
+	switch (setup.wRequestAndType) {
+	  case 0x0500: // SET_ADDRESS
+		usb2_endpoint0_receive(NULL, 0, 0);
+		USB2_DEVICEADDR = USB_DEVICEADDR_USBADR(setup.wValue) | USB_DEVICEADDR_USBADRA;
+		return;
+	  case 0x0900: // SET_CONFIGURATION
+		usb2_configuration = setup.wValue;
+		// configure all other endpoints
+#if 0
+		volatile uint32_t *reg = &USB2_ENDPTCTRL1;
+		const uint32_t *cfg = usb2_endpoint_config_table;
+		int i;
+		for (i=0; i < NUM_ENDPOINTS; i++) {
+			uint32_t n = *cfg++;
+			*reg = n;
+			// TODO: do the TRX & RXR bits self clear??
+			uint32_t m = n & ~(USB_ENDPTCTRL_TXR | USB_ENDPTCTRL_RXR);
+			*reg = m;
+			//uint32_t p = *reg;
+			//printf(" ep=%d: cfg=%08lX - %08lX - %08lX\n", i + 1, n, m, p);
+			reg++;
+		}
+#else
+		#if defined(USB2_ENDPOINT2_CONFIG)
+		USB2_ENDPTCTRL2 = USB2_ENDPOINT2_CONFIG;
+		#endif
+		#if defined(USB2_ENDPOINT3_CONFIG)
+		USB2_ENDPTCTRL3 = USB2_ENDPOINT3_CONFIG;
+		#endif
+		#if defined(USB2_ENDPOINT4_CONFIG)
+		USB2_ENDPTCTRL4 = USB2_ENDPOINT4_CONFIG;
+		#endif
+		#if defined(USB2_ENDPOINT5_CONFIG)
+		USB2_ENDPTCTRL5 = USB2_ENDPOINT5_CONFIG;
+		#endif
+		#if defined(USB2_ENDPOINT6_CONFIG)
+		USB2_ENDPTCTRL6 = USB2_ENDPOINT6_CONFIG;
+		#endif
+		#if defined(USB2_ENDPOINT7_CONFIG)
+		USB2_ENDPTCTRL7 = USB2_ENDPOINT7_CONFIG;
+		#endif
+#endif
+		#if defined(USB2_CDC_STATUS_INTERFACE) && defined(USB2_CDC_DATA_INTERFACE)
+			usb2_serial_configure();
+		#elif defined(USB2_SEREMU_INTERFACE)
+			usb2_seremu_configure();
+		#endif
+		#if defined(USB2_MTP_INTERFACE)
+		usb2_mtp_configure();
+		#endif
+
+		usb2_endpoint0_receive(NULL, 0, 0);
+		return;
+	  case 0x0880: // GET_CONFIGURATION
+		reply_buffer[0] = usb2_configuration;
+		usb2_endpoint0_transmit(reply_buffer, 1, 0);
+		return;
+	  case 0x0080: // GET_STATUS (device)
+		reply_buffer[0] = 0;
+		reply_buffer[1] = 0;
+		usb2_endpoint0_transmit(reply_buffer, 2, 0);
+		return;
+	  case 0x0082: // GET_STATUS (endpoint)
+		usb2_endpoint = setup.wIndex & 0x7F;
+		if (usb2_endpoint > 7) break;
+		dir = setup.wIndex & 0x80;
+		ctrl = *((uint32_t *)&USB2_ENDPTCTRL0 + usb2_endpoint);
+		reply_buffer[0] = 0;
+		reply_buffer[1] = 0;
+		if ((dir && (ctrl & USB_ENDPTCTRL_TXS)) || (!dir && (ctrl & USB_ENDPTCTRL_RXS))) {
+			reply_buffer[0] = 1;
+		}
+		usb2_endpoint0_transmit(reply_buffer, 2, 0);
+		return;
+	  case 0x0302: // SET_FEATURE (endpoint)
+		usb2_endpoint = setup.wIndex & 0x7F;
+		if (usb2_endpoint > 7) break;
+		dir = setup.wIndex & 0x80;
+		if (dir) {
+			*((volatile uint32_t *)&USB2_ENDPTCTRL0 + usb2_endpoint) |= USB_ENDPTCTRL_TXS;
+		} else {
+			*((volatile uint32_t *)&USB2_ENDPTCTRL0 + usb2_endpoint) |= USB_ENDPTCTRL_RXS;
+		}
+		usb2_endpoint0_receive(NULL, 0, 0);
+		return;
+	  case 0x0102: // CLEAR_FEATURE (endpoint)
+		usb2_endpoint = setup.wIndex & 0x7F;
+		if (usb2_endpoint > 7) break;
+		dir = setup.wIndex & 0x80;
+		if (dir) {
+			*((volatile uint32_t *)&USB2_ENDPTCTRL0 + usb2_endpoint) &= ~USB_ENDPTCTRL_TXS;
+		} else {
+			*((volatile uint32_t *)&USB2_ENDPTCTRL0 + usb2_endpoint) &= ~USB_ENDPTCTRL_RXS;
+		}
+		usb2_endpoint0_receive(NULL, 0, 0);
+		return;
+	  case 0x0680: // GET_DESCRIPTOR
+	  case 0x0681:
+		for (list = usb2_descriptor_list; list->addr != NULL; list++) {
+			if (setup.wValue == list->wValue && setup.wIndex == list->wIndex) {
+				if ((setup.wValue >> 8) == 3) {
+					// for string descriptors, use the descriptor's
+					// length field, allowing runtime configured length.
+					datalen = *(list->addr);
+				} else {
+					datalen = list->length;
+				}
+				if (datalen > setup.wLength) datalen = setup.wLength;
+				usb2_endpoint0_transmit(list->addr, datalen, 0);
+				return;
+			}
+		}
+		break;
+	  case 0x2221: // CDC_SET_CONTROL_LINE_STATE
+	#if defined(USB2_CDC_STATUS_INTERFACE) && defined(USB2_CDC_DATA_INTERFACE)
+		usb2_cdc_line_rtsdtr_millis = systick_millis_count;
+		usb2_cdc_line_rtsdtr = setup.wValue;
+	  case 0x2321: // CDC_SEND_BREAK
+		usb2_endpoint0_receive(NULL, 0, 0);
+		return;
+	  case 0x2021: // CDC_SET_LINE_CODING
+		if (setup.wLength != 7) break;
+		usb2_endpoint0_setupdata.bothwords = setupdata;
+		usb2_endpoint0_receive(usb2_endpoint0_buffer, 7, 1);
+		return;
+	#endif
+	
+	#if defined(USB2_SEREMU_INTERFACE)
+	  case 0x0921: // HID SET_REPORT
+		//serial_print(":)\n");
+		//usb2_endpoint0_receive(NULL, 0, 0);
+		return;
+	  case 0x0A21: // HID SET_IDLE
+//		  break;
+		usb2_endpoint0_receive(NULL, 0, 0);
+		return;
+	  // case 0xC940:
+	#endif
+	
+	#if defined(USB2_MTP_INTERFACE)
+	case 0x64A1: // Cancel Request (PTP spec, 5.2.1, page 8)
+		// TODO: required by PTP spec
+		break;
+	case 0x66A1: // Device Reset (PTP spec, 5.2.3, page 10)
+		// TODO: required by PTP spec
+		break;
+	case 0x67A1: // Get Device Statis (PTP spec, 5.2.4, page 10)
+		// For now, always respond with status ok.
+		reply_buffer[0] = 0x4;
+		reply_buffer[1] = 0;
+		reply_buffer[2] = 0x01;
+		reply_buffer[3] = 0x20;
+		usb2_endpoint0_transmit(reply_buffer, 4, 0);
+		return;
+	#endif
+	
+	}
+	USB2_ENDPTCTRL0 = 0x000010001; // stall
+}
+
+static void usb2_endpoint0_transmit(const void *data, uint32_t len, int notify)
+{
+	//printf("tx %lu\n", len);
+	if (len > 0) {
+		// Executing A Transfer Descriptor, page 3182
+		usb2_endpoint0_transfer_data.next = 1;
+		usb2_endpoint0_transfer_data.status = (len << 16) | (1<<7);
+		uint32_t addr = (uint32_t)data;
+		usb2_endpoint0_transfer_data.pointer0 = addr; // format: table 55-60, pg 3159
+		usb2_endpoint0_transfer_data.pointer1 = addr + 4096;
+		usb2_endpoint0_transfer_data.pointer2 = addr + 8192;
+		usb2_endpoint0_transfer_data.pointer3 = addr + 12288;
+		usb2_endpoint0_transfer_data.pointer4 = addr + 16384;
+		//  Case 1: Link list is empty, page 3182
+		usb2_endpoint_queue_head[1].next = (uint32_t)&usb2_endpoint0_transfer_data;
+		usb2_endpoint_queue_head[1].status = 0;
+		USB2_ENDPTPRIME |= (1<<16);
+		while (USB2_ENDPTPRIME) ;
+	}
+	usb2_endpoint0_transfer_ack.next = 1;
+	usb2_endpoint0_transfer_ack.status = (1<<7) | (notify ? (1 << 15) : 0);
+	usb2_endpoint0_transfer_ack.pointer0 = 0;
+	usb2_endpoint_queue_head[0].next = (uint32_t)&usb2_endpoint0_transfer_ack;
+	usb2_endpoint_queue_head[0].status = 0;
+	USB2_ENDPTPRIME |= (1<<0);
+	usb2_endpoint0_notify_mask = (notify ? (1 << 0) : 0);
+	while (USB2_ENDPTPRIME) ;
+}
+
+static void usb2_endpoint0_receive(void *data, uint32_t len, int notify)
+{
+	//printf("rx %lu\n", len);
+	if (len > 0) {
+		// Executing A Transfer Descriptor, page 3182
+		usb2_endpoint0_transfer_data.next = 1;
+		usb2_endpoint0_transfer_data.status = (len << 16) | (1<<7) | (notify ? (1 << 15) : 0);
+		uint32_t addr = (uint32_t)data;
+		usb2_endpoint0_transfer_data.pointer0 = addr; // format: table 55-60, pg 3159
+		usb2_endpoint0_transfer_data.pointer1 = addr + 4096;
+		usb2_endpoint0_transfer_data.pointer2 = addr + 8192;
+		usb2_endpoint0_transfer_data.pointer3 = addr + 12288;
+		usb2_endpoint0_transfer_data.pointer4 = addr + 16384;
+		//  Case 1: Link list is empty, page 3182
+		usb2_endpoint_queue_head[0].next = (uint32_t)&usb2_endpoint0_transfer_data;
+		usb2_endpoint_queue_head[0].status = 0;
+		USB2_ENDPTPRIME |= (1<<0);
+		while (USB2_ENDPTPRIME) ;
+	}
+	usb2_endpoint0_transfer_ack.next = 1;
+	usb2_endpoint0_transfer_ack.status = (1<<7);
+	usb2_endpoint0_transfer_ack.pointer0 = 0;
+	usb2_endpoint_queue_head[1].next = (uint32_t)&usb2_endpoint0_transfer_ack;
+	usb2_endpoint_queue_head[1].status = 0;
+	USB2_ENDPTPRIME |= (1<<16);
+	usb2_endpoint0_notify_mask = (notify ? (1 << 16) : 0);
+	while (USB2_ENDPTPRIME) ;
+}
+
+/*typedef union {
+ struct {
+  union {
+   struct {
+        uint8_t bmRequestType;
+        uint8_t bRequest;
+   };
+        uint16_t wRequestAndType;
+  };
+        uint16_t wValue;
+        uint16_t wIndex;
+        uint16_t wLength;
+ };
+ struct {
+        uint32_t word1;
+        uint32_t word2;
+ };
+	uint64_t bothwords;
+} setup_t; */
+
+
+static void usb2_endpoint0_complete(void)
+{
+	volatile setup_t setup;
+
+	setup.bothwords = usb2_endpoint0_setupdata.bothwords;
+	//printf("complete\n");
+#ifdef USB2_CDC_STATUS_INTERFACE
+	if (setup.wRequestAndType == 0x2021 /*CDC_SET_LINE_CODING*/) {
+		memcpy(usb2_cdc_line_coding, usb2_endpoint0_buffer, 7);
+		//printf("usb2_cdc_line_coding, baud=%u\n", usb2_cdc_line_coding[0]);
+		if (usb2_cdc_line_coding[0] == 134) {
+			USB2_USBINTR |= USB_USBINTR_SRE;
+			usb2_reboot_timer = 80; // TODO: 10 if only 12 Mbit/sec
+		}
+	}
+#endif
+#ifdef USB2_SEREMU_INTERFACE
+#endif
+#ifdef USB2_MTP_INTERFACE
+#endif
+}
+
+static void usb2_endpoint_config(usb2_endpoint_t *qh, uint32_t config, void (*callback)(transfer_t *))
+{
+	memset(qh, 0, sizeof(usb2_endpoint_t));
+	qh->config = config;
+	qh->next = 1; // Terminate bit = 1
+	qh->callback_function = callback;
+}
+
+void usb2_config_rx(uint32_t ep, uint32_t packet_size, int do_zlp, void (*cb)(transfer_t *))
+{
+	uint32_t config = (packet_size << 16) | (do_zlp ? 0 : (1 << 29));
+	if (ep < 2 || ep > USB2_NUM_ENDPOINTS) return;
+	usb2_endpoint_config(usb2_endpoint_queue_head + ep * 2, config, cb);
+	if (cb) usb2_endpointN_notify_mask |= (1 << ep);
+}
+
+void usb2_config_tx(uint32_t ep, uint32_t packet_size, int do_zlp, void (*cb)(transfer_t *))
+{
+	uint32_t config = (packet_size << 16) | (do_zlp ? 0 : (1 << 29));
+	if (ep < 2 || ep > USB2_NUM_ENDPOINTS) return;
+	usb2_endpoint_config(usb2_endpoint_queue_head + ep * 2 + 1, config, cb);
+	if (cb) usb2_endpointN_notify_mask |= (1 << (ep + 16));
+}
+
+
+
+void usb2_prepare_transfer(transfer_t *transfer, const void *data, uint32_t len, uint32_t param)
+{
+	transfer->next = 1;
+	transfer->status = (len << 16) | (1<<7);
+	uint32_t addr = (uint32_t)data;
+	transfer->pointer0 = addr;
+	transfer->pointer1 = addr + 4096;
+	transfer->pointer2 = addr + 8192;
+	transfer->pointer3 = addr + 12288;
+	transfer->pointer4 = addr + 16384;
+	transfer->callback_param = param;
+}
+
+#if 0
+void usb2_print_transfer_log(void)
+{
+	uint32_t i, count;
+	printf("log %d transfers\n", transfer_log_count);
+	count = transfer_log_count;
+	if (count > LOG_SIZE) count = LOG_SIZE;
+
+	for (i=0; i < count; i++) {
+		if (transfer_log_head == 0) transfer_log_head = LOG_SIZE;
+		transfer_log_head--;
+		uint32_t log = transfer_log[transfer_log_head];
+		printf(" %c %X\n", log >> 8, (int)(log & 255));
+	}
+}
+#endif
+
+static void schedule_transfer(usb2_endpoint_t *usb2_endpoint, uint32_t epmask, transfer_t *transfer)
+{
+	// when we stop at 6, why is the last transfer missing from the USB output?
+	//if (transfer_log_count >= 6) return;
+
+	//uint32_t ret = (*(const uint8_t *)transfer->pointer0) << 8;
+	if (usb2_endpoint->callback_function) {
+		transfer->status |= (1<<15);
+	}
+	__disable_irq();
+	//digitalWriteFast(1, HIGH);
+	// Executing A Transfer Descriptor, page 2468 (RT1060 manual, Rev 1, 12/2018)
+	transfer_t *last = usb2_endpoint->last_transfer;
+	if (last) {
+		last->next = (uint32_t)transfer;
+		if (USB2_ENDPTPRIME & epmask) goto end;
+		//digitalWriteFast(2, HIGH);
+		//ret |= 0x01;
+		uint32_t status;
+		do {
+			USB2_USBCMD |= USB_USBCMD_ATDTW;
+			status = USB2_ENDPTSTATUS;
+		} while (!(USB2_USBCMD & USB_USBCMD_ATDTW));
+		//USB2_USBCMD &= ~USB_USBCMD_ATDTW;
+		if (status & epmask) goto end;
+		//ret |= 0x02;
+	}
+	//digitalWriteFast(4, HIGH);
+	usb2_endpoint->next = (uint32_t)transfer;
+	usb2_endpoint->status = 0;
+	USB2_ENDPTPRIME |= epmask;
+	usb2_endpoint->first_transfer = transfer;
+end:
+	usb2_endpoint->last_transfer = transfer;
+	__enable_irq();
+	//digitalWriteFast(4, LOW);
+	//digitalWriteFast(3, LOW);
+	//digitalWriteFast(2, LOW);
+	//digitalWriteFast(1, LOW);
+	//if (transfer_log_head > LOG_SIZE) transfer_log_head = 0;
+	//transfer_log[transfer_log_head++] = ret;
+	//transfer_log_count++;
+}
+	// ENDPTPRIME -  Software should write a one to the corresponding bit when
+	//		 posting a new transfer descriptor to an usb2_endpoint queue head.
+	//		 Hardware automatically uses this bit to begin parsing for a
+	//		 new transfer descriptor from the queue head and prepare a
+	//		 transmit buffer. Hardware clears this bit when the associated
+	//		 endpoint(s) is (are) successfully primed.
+	//		 Momentarily set by hardware during hardware re-priming
+	//		 operations when a dTD is retired, and the dQH is updated.
+
+	// ENDPTSTATUS - Transmit Buffer Ready - set to one by the hardware as a
+	//		 response to receiving a command from a corresponding bit
+	//		 in the ENDPTPRIME register.  . Buffer ready is cleared by
+	//		 USB reset, by the USB DMA system, or through the ENDPTFLUSH
+	//		 register.  (so 0=buffer ready, 1=buffer primed for transmit)
+
+	//  USBCMD.ATDTW - This bit is used as a semaphore to ensure proper addition
+	//		   of a new dTD to an active (primed) endpoint's linked list.
+	//		   This bit is set and cleared by software.
+	//		   This bit would also be cleared by hardware when state machine
+	//		   is hazard region for which adding a dTD to a primed endpoint
+	//		    may go unrecognized.
+
+/*struct endpoint_struct {
+	uint32_t config;
+	uint32_t current;
+	uint32_t next;
+	uint32_t status;
+	uint32_t pointer0;
+	uint32_t pointer1;
+	uint32_t pointer2;
+	uint32_t pointer3;
+	uint32_t pointer4;
+	uint32_t reserved;
+	uint32_t setup0;
+	uint32_t setup1;
+	transfer_t *first_transfer;
+	transfer_t *last_transfer;
+	void (*callback_function)(transfer_t *completed_transfer);
+	uint32_t unused1;
+};*/
+
+static void run_callbacks(usb2_endpoint_t *ep)
+{
+	transfer_t *t, *next;
+
+	//printf("run_callbacks\n");
+	t = ep->first_transfer;
+	while (t && (uint32_t)t != 1) {
+		if (!(t->status & (1<<7))) {
+			// transfer not active anymore
+			next = (transfer_t *)t->next;
+			ep->callback_function(t);
+		} else {
+			// transfer still active
+			ep->first_transfer = t;
+			return;
+		}
+		if (next == ep->last_transfer) break;
+		t = next;
+	}
+	// all transfers completed
+	ep->first_transfer = NULL;
+	ep->last_transfer = NULL;
+}
+
+void usb2_transmit(int usb2_endpoint_number, transfer_t *transfer)
+{
+	if (usb2_endpoint_number < 2 || usb2_endpoint_number > USB2_NUM_ENDPOINTS) return;
+	usb2_endpoint_t *usb2_endpoint = usb2_endpoint_queue_head + usb2_endpoint_number * 2 + 1;
+	uint32_t mask = 1 << (usb2_endpoint_number + 16);
+	schedule_transfer(usb2_endpoint, mask, transfer);
+}
+
+void usb2_receive(int usb2_endpoint_number, transfer_t *transfer)
+{
+	if (usb2_endpoint_number < 2 || usb2_endpoint_number > USB2_NUM_ENDPOINTS) return;
+	usb2_endpoint_t *usb2_endpoint = usb2_endpoint_queue_head + usb2_endpoint_number * 2;
+	uint32_t mask = 1 << usb2_endpoint_number;
+	schedule_transfer(usb2_endpoint, mask, transfer);
+}
+
+uint32_t usb2_transfer_status(const transfer_t *transfer)
+{
+	uint32_t status, cmd;
+	//int count=0;
+	cmd = USB2_USBCMD;
+	while (1) {
+		__disable_irq();
+		USB2_USBCMD = cmd | USB_USBCMD_ATDTW;
+		status = transfer->status;
+		cmd = USB2_USBCMD;
+		__enable_irq();
+		if (cmd & USB_USBCMD_ATDTW) return status;
+		//if (!(cmd & USB_USBCMD_ATDTW)) continue;
+		//if (status & 0x80) break; // for still active, only 1 reading needed
+		//if (++count > 1) break; // for completed, check 10 times
+	}
+}
+#endif
+
