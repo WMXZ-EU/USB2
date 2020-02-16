@@ -8,7 +8,7 @@
       "name": "Teensy 36",
       "includePath": [
         "src/**",
-        "${ROOT0}/cores/teensy3",
+        "${ROOT0}/cores/teensy3/**",
         "${LOCAL_LIBRARIES}/USB2/**"
       ],
       "forcedInclude": [],
@@ -28,7 +28,7 @@
       "name": "Teensy 40",
       "includePath": [
         "src/**",
-        "${ROOT0}/cores/teensy4",
+        "${ROOT0}/cores/teensy4/**"
       ],
       "forcedInclude": [],
       "defines": [

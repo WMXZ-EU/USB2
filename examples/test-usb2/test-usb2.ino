@@ -30,5 +30,4 @@ extern "C" void setup()
 extern "C" void loop()
 { 
   logg(1000,"loop");
-  
 }
