@@ -29,15 +29,16 @@
  */
 //WMXZ: cloned from rawhid and modified for mtp
 
-#include "usb_dev.h"
-#include "usb1_mtp.h"
 #include "core_pins.h" // for yield(), millis()
 #include <string.h>    // for memcpy()
+
+#include "usb_dev.h"
+#include "usb1_mtp.h"
 //#include "HardwareSerial.h"
 
-#include "debug/printf.h"
+//#include "debug/printf.h"
 
-#ifdef MTP_INTERFACE // defined by usb_dev.h -> usb_desc.h
+#if defined(USB1_TEST) && defined(__IMXRT1062__) && defined(MTP_INTERFACE)
 
 #define TX_NUM   1
 static transfer_t tx_transfer[TX_NUM] __attribute__ ((used, aligned(32)));

@@ -32,7 +32,7 @@
 
 #include "usb_desc.h"
 
-#if defined(MTP_INTERFACE)
+#if defined(USB1_TEST) && defined(__IMXRT1062__) && defined(MTP_INTERFACE)
 
 #define MTP_TX_SIZE MTP_TX_SIZE_480
 #define MTP_RX_SIZE MTP_RX_SIZE_480
