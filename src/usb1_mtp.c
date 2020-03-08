@@ -36,6 +36,8 @@
 #include "usb1_mtp.h"
 //#include "HardwareSerial.h"
 
+#define printf(...) //Serial.printf(__VA_ARGS__)
+
 //#include "debug/printf.h"
 
 #if defined(USB1_TEST) && defined(__IMXRT1062__) && defined(MTP_INTERFACE)
@@ -207,4 +209,6 @@ int usb_mtp_eventRecv(void *buffer, uint32_t timeout)
 
 	return MTP_EVENT_SIZE;
 }
+#else
+void usb_mtp_configure(void) {}
 #endif // MTP_INTERFACE

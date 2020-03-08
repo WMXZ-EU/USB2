@@ -32,6 +32,7 @@
 
 #include "usb_desc.h"
 
+#define USB1_TEST
 #if defined(USB1_TEST) && defined(__IMXRT1062__) && defined(MTP_INTERFACE)
 
 #define MTP_TX_SIZE MTP_TX_SIZE_480
@@ -72,5 +73,14 @@ public:
 //extern usb1_mtp_class MTP;
 
 #endif // __cplusplus
+
+#else
+#ifdef __cplusplus
+extern "C" {
+#endif
+void usb_mtp_configure(void);
+#ifdef __cplusplus
+}
+#endif
 
 #endif // MTP_INTERFACE

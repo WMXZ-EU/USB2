@@ -23,7 +23,7 @@ ifeq ($(BOARD_ID),T36)
 	Family 		:= teensy3
 	FLAGS_CPU   := -mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16 -fsingle-precision-constant
 	LIBS        := -larm_cortexM4lf_math -lm
-	DEFINES     := -D__MK66FX1M0__ 
+	DEFINES     := -D__MK66FX1M0__ -DARDUINO_TEENSY36
 	DEFINES     += -DF_CPU=96000000
 	DEFINES		+= -DUSB2_SERIAL
 	DEFINES		+= -DUSE_SDIO=1
@@ -34,17 +34,17 @@ ifeq ($(BOARD_ID),T40)
 	Family		:= teensy4
 	FLAGS_CPU   := -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv4-sp-d16 -fsingle-precision-constant
 	LIBS        := -larm_cortexM4lf_math -lm
-	DEFINES     := -D__IMXRT1062__ 
+	DEFINES     := -D__IMXRT1062__ -DARDUINO_TEENSY40
 	DEFINES     += -DF_CPU=396000000
 	Defines		+= -DUSE_SDIO=0
 endif
 
 DEFINES     += -D$(USB_DEVICE)
 $(info $(DEFINES))
-DEFINES     += -DTEENSYDUINO=149 -DARDUINO=10810 -DLAYOUT_US_ENGLISH
+DEFINES     += -DTEENSYDUINO=151 -DARDUINO=10812 -DLAYOUT_US_ENGLISH
 
 ROOT0		:= C:\Users\zimme\Documents
-ARDUINO		:= $(ROOT0)\arduino-1.8.10\hardware
+ARDUINO		:= $(ROOT0)\arduino-1.8.12\hardware
 
 LIBS_SHARED_BASE := $(ROOT0)\Arduino\libraries
 LIBS_SHARED      := USB2
