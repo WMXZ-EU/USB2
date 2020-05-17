@@ -45,6 +45,8 @@
 extern "C" {
 #endif
 int usb_mtp_haveRX(void);
+int usb_mtp_canTX(void);
+
 void usb_mtp_configure(void);
 int usb_mtp_recv(void *buffer, uint32_t timeout);
 int usb_mtp_send(const void *buffer, int len, uint32_t timeout);

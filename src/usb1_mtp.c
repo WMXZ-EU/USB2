@@ -52,15 +52,25 @@
 
 	extern volatile uint8_t usb_configuration;
 
-    static uint32_t mtp_RXcount=0;
-	static void tx_event(transfer_t *t) {}
+    static uint32_t mtp_TXcount=0;
+	static uint32_t mtp_RXcount=0;
+	
+	static void tx_event(transfer_t *t) {mtp_TXcount++;}
 	static void rx_event(transfer_t *t) {mtp_RXcount++;}
+	
 	int usb_mtp_haveRX(void)
 	{	static uint32_t old_RXcount=-1;
 		if(mtp_RXcount==old_RXcount) return 0;
 		old_RXcount++;
 		return 1;
 	}
+
+	int usb_mtp_canTX(void)
+	{	static uint32_t old_TXcount=0;
+	    int can=mtp_TXcount - old_TXcount;
+		old_TXcount++;
+		return can<TX_NUM;
+	}	
 
 	void usb_mtp_configure(void)
 	{
