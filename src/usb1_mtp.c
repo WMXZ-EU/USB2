@@ -90,8 +90,11 @@
 
 		memcpy(buffer, rx_buffer, MTP_RX_SIZE);
 		memset(rx_transfer, 0, sizeof(rx_transfer));
+
+		NVIC_DISABLE_IRQ(IRQ_USB1);
 		usb_prepare_transfer(rx_transfer + 0, rx_buffer, MTP_RX_SIZE, 0);
 		usb_receive(MTP_RX_ENDPOINT, rx_transfer + 0);
+		NVIC_ENABLE_IRQ(IRQ_USB1);
 		return MTP_RX_SIZE;
 	}
 
@@ -102,10 +105,9 @@
 
 		uint8_t *txdata = txbuffer + (tx_head * MTP_TX_SIZE);
 		memcpy(txdata, buffer, len);
-		usb_prepare_transfer(xfer, txdata,len, 0);
+		usb_prepare_transfer(xfer, txdata, len, 0);
 		usb_transmit(MTP_TX_ENDPOINT, xfer);
 		if (++tx_head >= TX_NUM) tx_head = 0;
-		asm("wfi");
 		return len;
 	}
 
