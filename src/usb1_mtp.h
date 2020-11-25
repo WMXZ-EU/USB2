@@ -52,6 +52,9 @@ int usb_mtp_recv(void *buffer, uint32_t timeout);
 int usb_mtp_send(const void *buffer, int len, uint32_t timeout);
 int usb_mtp_available(void);
 
+int usb_mtp_recvEevent(const void *buffer, uint32_t len, uint32_t timeout);
+int usb_mtp_sendEevent(const void *buffer, uint32_t len, uint32_t timeout);
+
 #ifdef __cplusplus
 }
 #endif
@@ -66,8 +69,8 @@ public:
 //	int read(void *buffer, uint16_t timeout) { return usb_mtp_read(buffer, timeout); }
 	int recv(void *buffer, uint16_t timeout) { return usb_mtp_recv(buffer, timeout); }
 	int send(const void *buffer, int len, uint16_t timeout) { return usb_mtp_send(buffer, len, timeout); }
-//	int eventSend(const void *buffer, uint16_t timeout) { return usb_mtp_eventSend(buffer, timeout); }
-//	int eventRecv(void *buffer, uint16_t timeout) { return usb_mtp_eventRecv(buffer, timeout); }
+//	int sendEvent(const void *buffer, uint16_t timeout) { return usb_mtp_eventSend(buffer, timeout); }
+//	int recvEvent(void *buffer, uint16_t timeout) { return usb_mtp_eventRecv(buffer, timeout); }
 };
 
 //extern usb1_mtp_class MTP;

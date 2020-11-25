@@ -38,8 +38,6 @@
 
 #define printf(...) //Serial.printf(__VA_ARGS__)
 
-//#include "debug/printf.h"
-
 #if defined(USB1_TEST) && defined(__IMXRT1062__) && defined(MTP_INTERFACE)
 
 	#define TX_NUM   4
@@ -50,13 +48,27 @@
 	static transfer_t rx_transfer[1] __attribute__ ((used, aligned(32)));
 	static uint8_t rx_buffer[MTP_RX_SIZE];
 
+	static transfer_t tx_event_transfer[1] __attribute__ ((used, aligned(32)));
+	static uint8_t tx_event_buffer[MTP_EVENT_SIZE] __attribute__ ((used, aligned(32)));
+
+	static transfer_t rx_event_transfer[1] __attribute__ ((used, aligned(32)));
+	static uint8_t rx_event_buffer[MTP_EVENT_SIZE] __attribute__ ((used, aligned(32)));
+
+
 	extern volatile uint8_t usb_configuration;
 
     static uint32_t mtp_TXcount=0;
 	static uint32_t mtp_RXcount=0;
+	static uint32_t mtp_txEventcount=0;
+	static uint32_t mtp_rxEventcount=0;
+
+	uint32_t get_mtp_txEventcount() {return mtp_txEventcount; }
+	uint32_t get_mtp_rxEventcount() {return mtp_rxEventcount; }
 	
 	static void tx_event(transfer_t *t) {mtp_TXcount++;}
 	static void rx_event(transfer_t *t) {mtp_RXcount++;}
+	static void txEvent_event(transfer_t *t) {mtp_txEventcount++;}
+	static void rxEvent_event(transfer_t *t) {mtp_rxEventcount++;}
 
 	void usb_mtp_configure(void)
 	{
@@ -65,10 +77,18 @@
 		memset(rx_transfer, 0, sizeof(rx_transfer));
 		tx_head = 0;
 		usb_config_tx(MTP_TX_ENDPOINT, MTP_TX_SIZE, 0, tx_event);
+		//
 		usb_config_rx(MTP_RX_ENDPOINT, MTP_RX_SIZE, 0, rx_event);
 		//usb_config_rx(MTP_RX_ENDPOINT, MTP_RX_SIZE, 0, NULL); // why does this not work?
 		usb_prepare_transfer(rx_transfer + 0, rx_buffer, MTP_RX_SIZE, 0);
 		usb_receive(MTP_RX_ENDPOINT, rx_transfer + 0);
+		//
+		usb_config_tx(MTP_EVENT_ENDPOINT, MTP_EVENT_SIZE, 0, txEvent_event);
+		//	
+//		usb_config_rx(MTP_EVENT_ENDPOINT, MTP_EVENT_SIZE, 0, rxEvent_event);
+//		usb_prepare_transfer(rx_event_transfer + 0, rx_event_buffer, MTP_EVENT_SIZE, 0);
+//		usb_receive(MTP_EVENT_ENDPOINT, rx_event_transfer + 0);
+
 	}
 
 	static int usb_mtp_wait(transfer_t *xfer, uint32_t timeout)
@@ -92,7 +112,7 @@
 		memset(rx_transfer, 0, sizeof(rx_transfer));
 
 		NVIC_DISABLE_IRQ(IRQ_USB1);
-		usb_prepare_transfer(rx_transfer + 0, rx_buffer, MTP_RX_SIZE, 0);
+		usb_prepare_transfer(rx_transfer + 0, rx_buffer, MTP_RX_SIZE,0);
 		usb_receive(MTP_RX_ENDPOINT, rx_transfer + 0);
 		NVIC_ENABLE_IRQ(IRQ_USB1);
 		return MTP_RX_SIZE;
@@ -105,7 +125,7 @@
 
 		uint8_t *txdata = txbuffer + (tx_head * MTP_TX_SIZE);
 		memcpy(txdata, buffer, len);
-		usb_prepare_transfer(xfer, txdata, len, 0);
+		usb_prepare_transfer(xfer, txdata, len, tx_head);
 		usb_transmit(MTP_TX_ENDPOINT, xfer);
 		if (++tx_head >= TX_NUM) tx_head = 0;
 		return len;
@@ -117,6 +137,33 @@
 		if (!(usb_transfer_status(rx_transfer) & 0x80)) return MTP_RX_SIZE;
 		return 0;
 	}
+
+	int usb_mtp_recvEvent(void *buffer, uint32_t len, uint32_t timeout)
+	{
+		int ret= usb_mtp_wait(rx_event_transfer, timeout); if(ret<=0) return ret;
+
+		memcpy(buffer, rx_event_buffer, len);
+		memset(rx_event_transfer, 0, sizeof(rx_event_transfer));
+
+		NVIC_DISABLE_IRQ(IRQ_USB1);
+		usb_prepare_transfer(rx_event_transfer + 0, rx_event_buffer, MTP_EVENT_SIZE, 0);
+		usb_receive(MTP_EVENT_ENDPOINT, rx_event_transfer + 0);
+		NVIC_ENABLE_IRQ(IRQ_USB1);
+		return MTP_EVENT_SIZE;
+	}
+
+	int usb_mtp_sendEevent(const void *buffer, uint32_t len, uint32_t timeout)
+	{
+		transfer_t *xfer = tx_event_transfer;
+		int ret= usb_mtp_wait(xfer, timeout); if(ret<=0) return ret;
+
+		uint8_t *eventdata = tx_event_buffer;
+		memcpy(eventdata, buffer, len);
+		usb_prepare_transfer(xfer, eventdata, len, 0);
+		usb_transmit(MTP_EVENT_ENDPOINT, xfer);
+		return len;
+	}
+
 
 #else
 	void usb_mtp_configure(void) {}
