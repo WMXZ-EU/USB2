@@ -68,7 +68,7 @@
 	static void tx_event(transfer_t *t) {mtp_TXcount++;}
 	static void rx_event(transfer_t *t) {mtp_RXcount++;}
 	static void txEvent_event(transfer_t *t) {mtp_txEventcount++;}
-	static void rxEvent_event(transfer_t *t) {mtp_rxEventcount++;}
+//	static void rxEvent_event(transfer_t *t) {mtp_rxEventcount++;}
 
 	void usb_mtp_configure(void)
 	{
